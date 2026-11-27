@@ -46,11 +46,11 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:5px 4px;b
   <span id="spd" class="row" style="margin:0"><button data-r="0.25">0.25x</button><button data-r="0.5" class="act">0.5x</button><button data-r="1">1.0x</button></span>
 </div>
 <div class="row">
-  <label>스틸컷 <select id="smode"><option value="key">핵심 동작(자동)</option><option value="even">균등 간격</option></select> <select id="n"><option>6</option><option>7</option><option>8</option><option>9</option><option selected>10</option><option>11</option><option>12</option></select>컷</label>
+  <label>스틸컷 <select id="smode"><option value="key">핵심 동작(자동)</option><option value="even">균등 간격</option></select> <select id="n"><option>6</option><option>7</option><option selected>8</option><option>9</option><option>10</option><option>11</option><option>12</option></select>컷</label>
   <button id="shot" class="p">📸 스틸컷 만들기</button>
 </div>
 <div id="v3box" hidden>
-  <div class="row"><button data-y="0.5" data-p="-0.2">3D 기본</button><button data-y="0" data-p="0">정면</button><button data-y="1.5708" data-p="0">측면</button><button data-y="0" data-p="-1.5708">위에서</button><label>확대 <input type="range" id="z3" min="70" max="220" value="100"></label><label><input type="checkbox" id="ar3"> 자동 회전</label><span class="small">드래그로 회전</span></div>
+  <div class="row"><button data-y="0.5" data-p="-0.2">3D 기본</button><button data-y="0" data-p="0">정면</button><button data-y="1.5708" data-p="0">측면</button><button data-y="0" data-p="-1.5708">위에서</button><select id="m3"><option value="model">스윙 모델(권장)</option><option value="raw">AI 원본 3D</option></select><label>확대 <input type="range" id="z3" min="70" max="220" value="100"></label><label><input type="checkbox" id="ar3"> 자동 회전</label><span class="small">드래그로 회전</span></div>
   <canvas id="c3" style="width:100%;height:420px;background:#0d1210;border-radius:10px;touch-action:none;display:block;position:relative;pointer-events:auto;cursor:grab"></canvas>
   <div class="small">파랑=몸의 왼쪽, 주황=오른쪽, 초록 선=척추, 분홍=손 궤적, 연두=체중 이동(바닥에 투영), 흰 막대=클럽. 깊이(앞뒤)는 추정 오차가 큽니다.</div>
 </div>
@@ -64,7 +64,7 @@ const $=id=>document.getElementById(id);
 const v=$('v'),c=$('c'),ctx=c.getContext('2d'),st=$('st');
 const CDN='https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
 const MODEL='https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/1/pose_landmarker_heavy.task';
-let lm=null,S=null,dt=1/30,PH=null,GF=[],CT=null,LAST=null,LASTC='',W3=[],KEYS=[];
+let lm=null,S=null,dt=1/30,PH=null,GF=[],CT=null,LAST=null,LASTC='',W3=[],KEYS=[],MD=[];
 
 // ---------- 지식베이스: [하한,상한,허용폭,가중치, 낮을때[제목,교정,드릴], 높을때[...]] ----------
 const M=[
@@ -314,19 +314,59 @@ const isP=()=>$('club').value==='P';
 // ---------- 3D 뷰어 (마네킹형: 입체 몸통·바닥 그림자·체중 이동 궤적·클럽) ----------
 let Y3=.5,P3=-.2,Z3=1,TM3=.5,dr3=null;const c3=$('c3'),x3=c3.getContext('2d'),J3=[0,7,8,11,12,13,14,15,16,23,24,25,26,27,28,29,30,31,32];
 const m3=(a,b)=>[(a[0]+b[0])/2,(a[1]+b[1])/2,(a[2]+b[2])/2],ex3=(a,b,k)=>[b[0]+(b[0]-a[0])*k,b[1]+(b[1]-a[1])*k,b[2]+(b[2]-a[2])*k];
-function pos3(i,j){const p=W3[i][j],h=hp(i),a=hp(PH.a),T=PH.T0||1;
+
+// ---------- 스윙 모델: 골프 스윙 메카니즘으로 3D 골격을 구성 ----------
+// 2D 영상의 확실한 정보(x,y)는 그대로 쓰고, 깊이(z)는 회전각·뼈 길이·발 고정 같은 스윙 규칙으로 만든다.
+const modelOn=()=>$('m3').value==='model';
+function ik(A,Gt,l1,l2,pole){
+  let v=[Gt[0]-A[0],Gt[1]-A[1],Gt[2]-A[2]],d=Math.hypot(v[0],v[1],v[2])||1e-6;const mx=l1+l2-1e-3;if(d>mx){v=v.map(q=>q*mx/d);d=mx}
+  const u=v.map(q=>q/d),a=(l1*l1-l2*l2+d*d)/(2*d),h=Math.sqrt(Math.max(0,l1*l1-a*a)),pp=pole[0]*u[0]+pole[1]*u[1]+pole[2]*u[2];
+  let o=[pole[0]-pp*u[0],pole[1]-pp*u[1],pole[2]-pp*u[2]];const ol=Math.hypot(o[0],o[1],o[2]);o=ol<1e-6?[1,0,0]:o.map(q=>q/ol);
+  return[A[0]+u[0]*a+o[0]*h,A[1]+u[1]*a+o[1]*h,A[2]+u[2]*a+o[2]*h]}
+function buildModel(P,n){
+  const MK=.46,k=MK/P.T0,a=P.a,m=$('hand').value==='L'?-1:1,x0=hp(a)[0],y0=hp(a)[1];
+  const wid=(i,p,q)=>dd(S[i][p],S[i][q]),pc=arr=>arr.slice().sort((x,y)=>x-y)[Math.floor(arr.length*.9)];
+  const SW=pc(S.map((_,i)=>wid(i,11,12))),HW=pc(S.map((_,i)=>wid(i,23,24)));
+  // 회전 부호: 백스윙 방향(+) → 폭이 최대가 되는 프레임(정렬 지점) 이후 타깃 방향(−)
+  const tzOf=(p,q,lo,hi)=>{let b=-1,bi=hi;for(let i=lo;i<=hi;i++){const w=wid(i,p,q);if(w>b){b=w;bi=i}}return bi};
+  const tzs=tzOf(11,12,P.top,n-1),tzp=tzOf(23,24,P.top,Math.min(n-1,P.imp+2));
+  const rot=(p,q,W0,tz)=>zp(S.map((_,i)=>(i<tz?1:-1)*Math.acos(Math.min(1,wid(i,p,q)/W0))*m),dt,2.5,1);
+  const ps=rot(11,12,SW,tzs),pp=rot(23,24,HW,tzp);
+  const Lfull=P.T0*k/Math.cos(30*Math.PI/180),X2=(i,j)=>[(S[i][j][0]-x0)*k,(S[i][j][1]-y0)*k];
+  const p95=arr=>arr.slice().sort((x,y)=>x-y)[Math.floor(arr.length*.95)];
+  const armL=p95(S.map(f=>Math.max(dd(f[11],f[15]),dd(f[12],f[15]))))*k*1.12,legL=[27,28].map(j=>p95(S.map(f=>dd(f[j===27?23:24],f[j])))*k*1.03);
+  const l1=legL[0]/2,l2=legL[1]/2,dz=P.T0*.06,dm=v=>Math.sign(v)*Math.max(0,Math.abs(v)-dz),out=[];
+  for(let i=0;i<n;i++){
+    const M=Array.from({length:33},()=>[0,0,0]),hl=X2(i,23),hr=X2(i,24),sl=X2(i,11),sr=X2(i,12);
+    const hcx=(hl[0]+hr[0])/2,hcy=(hl[1]+hr[1])/2,scx=(sl[0]+sr[0])/2,scy=(sl[1]+sr[1])/2;
+    const zC=Math.sqrt(Math.max(0,Lfull*Lfull-(scx-hcx)**2-(scy-hcy)**2)),sz=SW*k/2*Math.sin(ps[i]),hz=HW*k/2*Math.sin(pp[i]);
+    M[23]=[hl[0],hl[1],hz];M[24]=[hr[0],hr[1],-hz];M[11]=[sl[0],sl[1],zC+sz];M[12]=[sr[0],sr[1],zC-sz];
+    const e1=X2(i,7),e2=X2(i,8),hx=(e1[0]+e2[0])/2,hy=(e1[1]+e2[1])/2,zH=zC+Math.sqrt(Math.max(0,.28*.28-(hx-scx)**2-(hy-scy)**2)),yw=.6*ps[i];
+    M[7]=[hx+Math.cos(yw)*.075,hy,zH+Math.sin(yw)*.075];M[8]=[hx-Math.cos(yw)*.075,hy,zH-Math.sin(yw)*.075];M[0]=[hx-Math.sin(yw)*.11,hy+.03,zH+Math.cos(yw)*.11];
+    const g2=X2(i,15);let G=[g2[0],g2[1],zC+Math.sqrt(Math.max(0,(armL*.93)**2-(g2[0]-scx)**2-(g2[1]-scy)**2))];
+    for(let it=0;it<5;it++){const d3=q=>Math.hypot(q[0]-G[0],q[1]-G[1],q[2]-G[2]),mx=Math.max(d3(M[11]),d3(M[12]));if(mx<=armL*.995)break;const f=armL*.995/mx,C=[scx,scy,zC];G=G.map((v,c)=>C[c]+(v-C[c])*f)}
+    M[15]=G;M[16]=G.slice();M[13]=ik(M[11],G,armL*.48,armL*.52,[.6,1,.2]);M[14]=ik(M[12],G,armL*.48,armL*.52,[-.6,1,.2]);
+    [27,28].forEach(j=>{const A0=X2(a,j);M[j]=[A0[0]+dm(S[i][j][0]-S[a][j][0])*k,A0[1]+dm(S[i][j][1]-S[a][j][1])*k,0]});
+    M[25]=ik(M[23],M[27],l1,l1,[.3,0,1]);M[26]=ik(M[24],M[28],l2,l2,[-.3,0,1]);
+    M[29]=[M[27][0],M[27][1]+.07,M[27][2]-.06];M[31]=[M[27][0]+.03,M[27][1]+.06,M[27][2]+.16];
+    M[30]=[M[28][0],M[28][1]+.07,M[28][2]-.06];M[32]=[M[28][0]-.03,M[28][1]+.06,M[28][2]+.16];
+    out.push(M)}
+  return out}
+const buildModelSafe=(P,n)=>{try{return $('view').value==='side'?[]:buildModel(P,n)}catch(e){console.warn(e);return[]}};
+const NF=()=>MD.length&&modelOn()?MD.length:W3.length;
+function pos3(i,j){if(MD.length&&modelOn())return MD[i][j];const p=W3[i][j],h=hp(i),a=hp(PH.a),T=PH.T0||1;
   if(j>=27&&j<=32){const q=W3[PH.a][j],dz=T*.06,dm=v=>Math.sign(v)*Math.max(0,Math.abs(v)-dz);
     return[q[0]+dm(S[i][j][0]-S[PH.a][j][0])/T*TM3,q[1]+dm(S[i][j][1]-S[PH.a][j][1])/T*TM3,q[2]]}
   return[p[0]+(h[0]-a[0])/T*TM3,p[1]+(h[1]-a[1])/T*TM3,p[2]]}
-function fr3(t){const n=W3.length,x=Math.max(0,Math.min(n-1.001,t/dt-.5)),i=Math.floor(x),u=x-i,o=[],i0=Math.max(0,i-1),i3=Math.min(n-1,i+2);
+function fr3(t){const n=NF(),x=Math.max(0,Math.min(n-1.001,t/dt-.5)),i=Math.floor(x),u=x-i,o=[],i0=Math.max(0,i-1),i3=Math.min(n-1,i+2);
   J3.forEach(j=>{const a=pos3(i0,j),b=pos3(i,j),c=pos3(i+1,j),d=pos3(i3,j);o[j]=[0,1,2].map(q=>cr(a[q],b[q],c[q],d[q],u))});return o}
 function club3(t,L){if(!CT||CT.length<2)return null;let j=0,b=1e9;CT.forEach((p,q)=>{const d=Math.abs(p.t-t);if(d<b){b=d;j=q}});if(b>1.5*dt)return null;
   const i=Math.max(0,Math.min(S.length-1,Math.round(CT[j].t/dt-.5))),h=hands(i),k=TM3/PH.T0,hd=m3(L[15],L[16]);return[hd,[hd[0]+(CT[j].x-h[0])*k,hd[1]+(CT[j].y-h[1])*k,hd[2]]]}
 function draw3(){
-  if($('v3box').hidden||!W3.length||!S||!PH)return;
+  if($('v3box').hidden||(!W3.length&&!MD.length)||!S||!PH)return;
   if($('ar3').checked&&!dr3)Y3+=.006;
   c3.width=c3.clientWidth||360;c3.height=420;const g=x3,K=c3.height/2.1*Z3,ca=Math.cos(Y3),sa=Math.sin(Y3),cb=Math.cos(P3),sb=Math.sin(P3),A0=PH.a;
-  {const a=m3(W3[A0][11],W3[A0][12]),h=m3(W3[A0][23],W3[A0][24]);TM3=Math.hypot(a[0]-h[0],a[1]-h[1],a[2]-h[2])||.5}
+  if(MD.length&&modelOn())TM3=.46;else{const a=m3(W3[A0][11],W3[A0][12]),h=m3(W3[A0][23],W3[A0][24]);TM3=Math.hypot(a[0]-h[0],a[1]-h[1],a[2]-h[2])||.5}
   const pr=p=>{const x=p[0]*ca+p[2]*sa;let z=-p[0]*sa+p[2]*ca;const y=p[1]*cb-z*sb;z=p[1]*sb+z*cb;return[c3.width/2+x*K,c3.height*.52+(y-.15)*K,z]};
   const ln=(a,b,col,w,dash)=>{const A=pr(a),B=pr(b);g.beginPath();g.setLineDash(dash||[]);g.strokeStyle=col;g.lineWidth=w;g.lineCap='round';g.moveTo(A[0],A[1]);g.lineTo(B[0],B[1]);g.stroke();g.setLineDash([])};
   const poly=(pts,fill,stroke)=>{g.beginPath();pts.forEach((p,i)=>{const q=pr(p);i?g.lineTo(q[0],q[1]):g.moveTo(q[0],q[1])});g.closePath();if(fill){g.fillStyle=fill;g.fill()}if(stroke){g.strokeStyle=stroke;g.lineWidth=1;g.stroke()}};
@@ -343,14 +383,14 @@ function draw3(){
   const as=m3(pos3(A0,11),pos3(A0,12)),ah=m3(pos3(A0,23),pos3(A0,24));ln(ex3(as,ah,.25),ex3(ah,as,1.1),'rgba(62,207,128,.9)',2,[6,5]);ln(pos3(A0,11),pos3(A0,12),'rgba(255,210,63,.9)',2,[6,5]);
   // 체중 이동 궤적(골반 중심의 바닥 투영) + 수직선
   g.strokeStyle='rgba(120,255,170,.9)';g.lineWidth=2.5;g.beginPath();let f0=true;
-  for(let i=0;i<W3.length&&(i+.5)*dt<=v.currentTime;i++){const q=pr(fl(m3(pos3(i,23),pos3(i,24))));f0?g.moveTo(q[0],q[1]):g.lineTo(q[0],q[1]);f0=false}g.stroke();
+  for(let i=0;i<NF()&&(i+.5)*dt<=v.currentTime;i++){const q=pr(fl(m3(pos3(i,23),pos3(i,24))));f0?g.moveTo(q[0],q[1]):g.lineTo(q[0],q[1]);f0=false}g.stroke();
   const hc=m3(L[23],L[24]);ln(hc,fl(hc),'rgba(120,255,170,.7)',1.5,[3,4]);{const q=pr(fl(hc));g.beginPath();g.fillStyle='#78ffaa';g.arc(q[0],q[1],5,0,7);g.fill()}
   // 그림자
   const B=[[11,13,'L'],[13,15,'L'],[12,14,'R'],[14,16,'R'],[23,25,'L'],[25,27,'L'],[24,26,'R'],[26,28,'R'],[11,12,'T'],[23,24,'T']];
   B.forEach(([a,b])=>ln(fl(L[a]),fl(L[b]),'rgba(0,0,0,.35)',5));
   // 손 궤적
   g.strokeStyle='rgba(255,150,200,.9)';g.lineWidth=2.5;g.beginPath();let f1=true;
-  for(let i=0;i<W3.length&&(i+.5)*dt<=v.currentTime;i++){const q=pr(m3(pos3(i,15),pos3(i,16)));f1?g.moveTo(q[0],q[1]):g.lineTo(q[0],q[1]);f1=false}g.stroke();
+  for(let i=0;i<NF()&&(i+.5)*dt<=v.currentTime;i++){const q=pr(m3(pos3(i,15),pos3(i,16)));f1?g.moveTo(q[0],q[1]):g.lineTo(q[0],q[1]);f1=false}g.stroke();
   // 몸통(면) + 어깨-발 사각형
   poly([L[11],L[12],L[28],L[27]],'rgba(74,163,255,.10)','#4aa3ff');
   poly([L[11],L[12],L[24],L[23]],'rgba(210,215,225,.38)','rgba(255,255,255,.8)');
@@ -487,11 +527,11 @@ async function still(){
 }
 $('shot').onclick=()=>still().catch(e=>{$('shot').disabled=false;st.textContent='오류: '+e.message});
 
-$('f').onchange=e=>{const f=e.target.files[0];if(f){v.src=URL.createObjectURL(f);S=null;PH=null;W3=[];CT=null;CD=null;GF=[];$('sheet').innerHTML='';$('res').innerHTML='';$('ph').innerHTML='';st.textContent='불러옴: '+f.name}};
+$('f').onchange=e=>{const f=e.target.files[0];if(f){v.src=URL.createObjectURL(f);S=null;PH=null;W3=[];MD=[];CT=null;CD=null;GF=[];$('sheet').innerHTML='';$('res').innerHTML='';$('ph').innerHTML='';st.textContent='불러옴: '+f.name}};
 $('go').onclick=async()=>{
   if(!v.videoWidth){st.textContent='먼저 영상을 선택하세요.';return}
   $('go').disabled=true;
-  try{const n=await analyze(),P=isP()?phasesPutt(n):phases(n);PH=P;render(isP()?puttMetrics(P):metrics(P),P,n);st.textContent='클럽 궤적 추적 중…';await new Promise(r=>setTimeout(r,0));try{CT=trackClub(GF,320,GF[0].length/320,v.videoWidth,v.videoHeight,$('club').value,P,n);CD=CT.length>1?dens(CT):null}catch(e){console.warn(e);CT=null;CD=null}KEYS=keyMoments(P,n);buildPh();st.textContent='분석 완료. 아래 버튼으로 어드레스·탑·임팩트 구간을 확인하세요.';v.currentTime=(P.top+.5)*dt}
+  try{const n=await analyze(),P=isP()?phasesPutt(n):phases(n);PH=P;render(isP()?puttMetrics(P):metrics(P),P,n);st.textContent='클럽 궤적 추적 중…';await new Promise(r=>setTimeout(r,0));try{CT=trackClub(GF,320,GF[0].length/320,v.videoWidth,v.videoHeight,$('club').value,P,n);CD=CT.length>1?dens(CT):null}catch(e){console.warn(e);CT=null;CD=null}KEYS=keyMoments(P,n);buildPh();MD=buildModelSafe(P,n);await still().catch(e=>console.warn(e));st.textContent='분석 완료. 핵심 동작 스틸컷이 아래에 만들어졌습니다. 구간 버튼으로 각 동작을 확인하세요.';v.currentTime=(P.top+.5)*dt}
   catch(e){st.textContent='오류: '+e.message;console.error(e)}
   $('go').disabled=false;
 };
